@@ -1769,12 +1769,21 @@ Part C done.
 
 ---
 
-## Part D — the client: no sampling
+## Part D — the client: three independent readings
 
-### D1. Edit `agentmd2cpn/llm_client.py`
+### D1. Check `agentmd2cpn/llm_client.py`
 
-In the `client.chat.completions.create(...)` call change `temperature=0.2` to `temperature=0`
-and add the argument `seed=7` (anywhere in the same call). gpt-4o accepts both.
+Keep `temperature=0.2`. In the `client.chat.completions.create(...)` call there must be **no**
+`seed=` argument (if one is there, remove it). Nothing else changes.
+
+Why not temperature 0: the three samples exist so that their vote means something. A sentence
+the model reads the same way three times is a stable reading; one it reads differently is
+listed under *Review first* as `[2/3 votes]` or `[1/3]`, which is exactly where a reviewer
+must look (your release run showed R15 and R16 that way). At temperature 0 with a fixed seed the
+three samples are the same text, every rule gets 3/3, and that signal is gone — the reading is
+not more correct, only its uncertainty is hidden. Reproducibility is not the sampling's job: the
+second run of an unchanged file never calls the model (the extraction is reused), and a reviewed
+spec is locked to the file's hash, so the result is identical by construction from then on.
 
 ### D2. Check
 
@@ -1856,7 +1865,82 @@ Part E done — the goal is reached. What is left is paperwork.
 
 ---
 
-## Part F — documentation, hygiene, commit, push
+## Part F — layout, documentation, hygiene, commit, push
+
+### F0. Package layout (Copilot)
+
+The package is flat today (one folder, sixteen modules). Before the push it becomes five
+sub-packages, one per stage. This is a pure move — no behaviour changes — and the 75 tests are
+the proof that nothing changed (Copilot may change their import lines, and nothing else; the
+check below verifies that mechanically). Paste into Copilot:
+
+```text
+Restructure the Python package agentmd2cpn into sub-packages. This is a pure move: no function, class, log message or behaviour changes - only file locations, import statements and the three path-dependent spots listed in step 3. Tests may change in their import lines only (step 6).
+
+Target layout (every file not named here stays where it is):
+
+agentmd2cpn/
+  __init__.py            public API (step 4) and __version__
+  __main__.py            python -m agentmd2cpn -> cli.main()
+  cli.py                 the pipeline driver: run(), main()
+  dsl.py                 AgentSpec, Action, DataType, Rule, Source, Fragment, ... (used by every layer)
+  logging_setup.py
+  extraction/            markdown -> typed rule DSL
+    __init__.py
+    ingest.py            moved from agentmd2cpn/ingest.py
+    extract.py           moved
+    llm_client.py        moved
+    prompt/extraction.yaml   moved from agentmd2cpn/prompt/
+  compilation/           DSL -> one cpnpy net
+    __init__.py
+    templates.py         moved
+    compile.py           moved
+    compose.py           moved
+    fastcpn.py           moved
+  verification/          state space, conflicts, enforcement witnesses, REPORT.md
+    __init__.py
+    verify.py            moved
+    verify_large.py      moved
+    selfcheck.py         moved
+    report.py            moved
+  runtime/               the Monitor and the standalone generated file
+    __init__.py
+    monitor.py           moved from agentmd2cpn/runtime.py (the only rename)
+    emit.py              moved
+
+Steps:
+1. Move the files with `git mv` so that history is kept.
+2. Rewrite every import inside the package to the new absolute paths, e.g. `from .templates import english` -> `from agentmd2cpn.compilation.templates import english`, `from .runtime import Monitor` -> `from agentmd2cpn.runtime.monitor import Monitor`, `from .dsl import AgentSpec` -> `from agentmd2cpn.dsl import AgentSpec`. No relative imports across sub-packages.
+3. Three path-dependent spots: (a) in verification/report.py, `_quiet()` disables the loggers named "agentmd2cpn.compile" and "agentmd2cpn.compose" - change the names to "agentmd2cpn.compilation.compile" and "agentmd2cpn.compilation.compose"; (b) in extraction/extract.py the prompt file is located relative to the module or via importlib.resources - make it find extraction/prompt/extraction.yaml; (c) in runtime/emit.py, if the generated standalone file or its template imports anything from agentmd2cpn, update that path (if it only embeds source with inspect, nothing to do).
+4. agentmd2cpn/__init__.py exports by name: AgentSpec, Action, DataType, Rule, parse_markdown, extract_spec, LLMExtractor, build_dfa, english, compile_spec, compose_sync, add_end, lower, build, state_space_check, verify_large, conflicts, enforcement_witnesses, write_report, Monitor, run_trace, emit_python, run, and keeps __version__ = "0.1.0". Each sub-package __init__.py re-exports its own public names the same way (for example runtime/__init__.py: `from agentmd2cpn.runtime.monitor import Monitor, run_trace`), nothing else.
+5. pyproject.toml: packages are discovered with `[tool.setuptools.packages.find] include = ["agentmd2cpn*"]` instead of a fixed list; the package-data entry becomes `[tool.setuptools.package-data] "agentmd2cpn.extraction" = ["prompt/*.yaml"]`; there is a console script `[project.scripts] agentmd2cpn = "agentmd2cpn.cli:main"`. Keep every dependency exactly as it is.
+6. tests/: change import lines only, to the new module paths (`from agentmd2cpn.verify import build` -> `from agentmd2cpn.verification.verify import build`, `from agentmd2cpn.runtime import Monitor` -> `from agentmd2cpn.runtime.monitor import Monitor`, `import agentmd2cpn.llm_client as m` -> `import agentmd2cpn.extraction.llm_client as m`, and so on for compile, compose, templates, ingest, extract, emit, verify_large, selfcheck, report). Not one assertion, fixture, string or value may change.
+7. examples/drive.py and every other .py under examples/: update their import lines the same way.
+8. Run `pip install -e .`, then `python -m pytest tests -q`, then `git status --short`, and show me all three outputs.
+```
+
+**Check** (all four, in this order):
+
+```powershell
+python -m pytest tests -q
+git diff -U0 -- tests | Select-String '^[+-](?![+-])' | Where-Object { $_.Line -notmatch 'import' }
+agentmd2cpn --help
+agentmd2cpn examples/review/review.agent.md -o out/review --no-png
+python -m agentmd2cpn examples/release_agent/.Agent.md -o out/release_agent --extractor yaml:examples/release_agent/spec.yaml --no-png
+```
+
+→ `75 passed`; the second command prints **nothing** (every changed line in `tests/` is an
+import line — if it prints anything, Copilot changed a test: `git checkout -- tests` and tell
+it to redo step 6 only); `--help` lists `agent_md`, `-o`, `--extractor`, `--lock`, `--mode`,
+`--min-votes`, `--samples`, `--verify`, `--no-png`; the review run says
+`reviewed spec examples\review\spec.yaml matches this file (hash …) - reused, LLM not called
+(9 actions, 8 rules)` and ends with `8 rules, 14 reachable markings, consistent=True, traps=0,
+dead=['merge_pr'], generated file re-verified=True`; the release run ends with `16 rules, 2569
+reachable markings, …` and `enforcement witnesses: 16 of 16 … within 436 markings`, exactly
+as in B14. If any of these differs, the move changed behaviour: show me the output.
+
+(Verified on the copy of your project: the move needs exactly the changes listed in steps 2, 3a
+and 6; the suite and both example runs are unchanged afterwards.)
 
 ### F1. `.gitignore`
 
@@ -1873,14 +1957,14 @@ build/
 ```text
 Update README.md and docs/ARCHITECTURE.md only (no code, no tests). Keep their structure; change these points:
 1. Input: any markdown file - .Agent.md, *.agent.md, *.skills.md, AGENTS.md or any .md - not only .Agent.md. The output name is the file name up to its first dot (a dot-file such as .Agent.md takes its folder's name).
-2. Usage: `agentmd2cpn file.md -o out/x` (default --extractor auto: the reviewed spec next to the file, else the previous extraction in the output folder, when its hash matches the file, else the model); `--extractor llm` (always the model); `--extractor yaml:<spec.yaml>`; `--lock` (write the spec used in this run, stamped with the file's hash, next to the file so later runs reuse it); `--verify auto|full|compositional`; `--no-png`. Runtime: `python examples/drive.py out/x <action> [<action>:<param>=<value> ...]` appends its decisions to monitor.log.
+2. Install and run (a section near the top, for someone who has never seen the repo): `git clone <repo>`, `git checkout feat/text2dsl`, `python -m venv .venv`, `.venv\Scripts\activate`, `pip install -e .[dev]`, `copy .env.example .env` and fill in the Azure values (only needed when a file is read for the first time); then `agentmd2cpn examples\review\review.agent.md -o out\review` (runs without the model: the reviewed spec is locked), `agentmd2cpn path\to\your.agent.md -o out\yours` (first run reads the file with the model; every later run of the unchanged file reuses that reading), `python examples\drive.py out\yours <action> [<action>:<param>=<value> ...]`, `python -m pytest tests -q`. Usage details: default `--extractor auto` (the reviewed spec next to the file, else the previous extraction in the output folder, when its hash matches the file, else the model); `--extractor llm` (always the model); `--extractor yaml:<spec.yaml>`; `--lock` (write the spec used in this run, stamped with the file's hash, next to the file so later runs reuse it); `--verify auto|full|compositional`; `--no-png`. `python -m agentmd2cpn ...` is the same command.
 3. Outputs in out/<name>/: agent_spec.yaml (the DSL; carries source_hash and provenance), REPORT.md (Review first - rules the samples disagreed on and rule-like sentences without a rule; Verdict; Conflicts as sentences with line numbers and the dead end as the Monitor sees it; Actions that can never happen; Enforcement check - one step the net refuses because of each rule alone; Rules table; Actions), monitor.log (the verifier's complete run and one refused step per rule, replayed on the Monitor, plus drive.py decisions), <name>_cpn.py (standalone, re-verifies itself; header names the source file, its hash and the provenance of the rules), <name>_cpn.json, <name>_cpn.png, pipeline.jsonl, report.json.
 4. A section "Reproducibility" (one paragraph): the model reads a file once per version; every rule quotes the sentence it came from and must be found at the cited lines; the reviewed spec is locked to the file's hash and reused; a changed file is detected, read again and reported; everything after the YAML (compile, verify, report, emit, monitor) is deterministic.
 5. A section "Workflow for a new file": run; read Review first and Conflicts in REPORT.md; fix agent_spec.yaml if a sentence was misread; rerun with --extractor yaml:<that file> --lock; from then on every run is identical and calls no model.
-6. Layout: add agentmd2cpn/report.py (REPORT.md), agentmd2cpn/selfcheck.py (enforcement witnesses and the Monitor replay), agentmd2cpn/prompt/extraction.yaml (the extraction prompt), examples/review/ (the code-review agent example), and the new test files.
+6. Layout: describe the package as it is now - agentmd2cpn/dsl.py, cli.py, logging_setup.py at the top; extraction/ (ingest.py, extract.py, llm_client.py, prompt/extraction.yaml), compilation/ (templates.py, compile.py, compose.py, fastcpn.py), verification/ (verify.py, verify_large.py, selfcheck.py, report.py), runtime/ (monitor.py, emit.py); one line per file saying what it does; then examples/ (release_agent, expert, universal, review, drive.py) and tests/.
 7. Tests: the count is what `python -m pytest tests -q` prints now (run it and use that number).
 8. Limitations: add - a rule that is implied by another rule (every step it refuses, the other refuses too) is named with the implying rule and the reason; a rule for which no step refused by it alone is found within the search bound is reported as such (implied, or deeper than the search went), not as proven; phase_sequence allows a phase with no action of its own (seen in the review agent); conditions are checked on the parameters the caller passes, not on what the called tool actually returned; init/end accept a list of alternatives, other kinds do not.
-9. docs/ARCHITECTURE.md: in the pipeline/stage list add `selfcheck` (enforcement witnesses, Monitor replay) and `report` (REPORT.md) between verify and emit, and the auto/lock logic of the extract stage (lock_path, find_spec, source_hash).
+9. docs/ARCHITECTURE.md: in the pipeline/stage list add `selfcheck` (enforcement witnesses, Monitor replay) and `report` (REPORT.md) between verify and emit, and the auto/lock logic of the extract stage (lock_path, find_spec, source_hash); map the stages to the sub-packages (ingest, extract -> extraction/; compile -> compilation/; verify, selfcheck, report -> verification/; emit and the Monitor -> runtime/).
 Do not change any number you cannot read from the current outputs. Then show me the diff.
 ```
 
@@ -1899,10 +1983,11 @@ git status
 ```
 
 The second `git status` must show **no** `.env`, no `out/`, no `agentmd2cpn.egg-info`, no
-`dist/`, no `build/`. If any of them appears, stop: `git reset` and fix `.gitignore`. Then:
+`dist/`, no `build/`; the moved modules appear as `renamed:`. If one of the forbidden entries
+appears, stop: `git reset` and fix `.gitignore`. Then:
 
 ```powershell
-git commit -m "agentmd2cpn: robustness, REPORT.md, lock (one extraction per file version), enforcement check, init/end alternatives, package"
+git commit -m "agentmd2cpn: robustness, REPORT.md, lock (one extraction per file version), enforcement check, init/end alternatives, package layout"
 git push -u origin feat/text2dsl
 ```
 
