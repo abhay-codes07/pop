@@ -3,7 +3,7 @@
 Twelve points were raised while the system was explained. This document answers each one as the
 system really is, says what was changed because of it, and (Part A) gives the exact steps to apply
 the changes. Everything in Part A was built and verified on a copy of the project: the suite goes
-from 75 to 78 tests, every example gives the same verdicts as before, and the 168-case DSL sweep is
+from 75 to 79 tests, every example gives the same verdicts as before, and the 168-case DSL sweep is
 unchanged.
 
 The short version of what changed:
@@ -42,9 +42,9 @@ The short version of what changed:
 |---|---|---|
 | `agentmd2cpn/cli.py` | 431 | `6d9496a9` |
 | `agentmd2cpn/logging_setup.py` | 57 | `71acda6d` |
-| `agentmd2cpn/runtime/emit.py` | 299 | `47442ed5` |
+| `agentmd2cpn/runtime/emit.py` | 299 | `fe4cd2a3` |
 | `tests/test_cli.py` | 109 | `e02e51b8` |
-| `tests/test_emit.py` | 61 | `2452a89c` |
+| `tests/test_emit.py` | 69 | `e010cfbd` |
 
 The five files are in Part C of this document. Nothing else in the package changes.
 
@@ -62,8 +62,10 @@ pip install -e .
 python -m pytest tests -q
 ```
 
-→ `78 passed` (two new tests in `test_cli.py`: the stage commands and `drive`; one in `test_emit.py`:
-the generated file replays a run with rule names). Then, on the review example (its spec is locked,
+→ `79 passed` (two new tests in `test_cli.py`: the stage commands and `drive`; two in `test_emit.py`:
+the generated file replays a run with rule names, and its header survives a Windows path — the
+`C:\Users` in a docstring that made `ast.parse` fail with *truncated \UXXXXXXXX escape*; the path
+is now written with forward slashes). Then, on the review example (its spec is locked,
 so no model is called):
 
 ```powershell
@@ -160,7 +162,7 @@ Read the diff before accepting. The outputs in the RUNBOOK must be the ones you 
 ### A5. Commit
 
 ```powershell
-python -m pytest tests -q      # 78 passed
+python -m pytest tests -q      # 79 passed
 git add agentmd2cpn tests examples README.md docs
 git status --short            # no out/, no .env, no egg-info, no dist/
 git commit -m "agentmd2cpn: stage commands, drive with marking.png, logs per run, standalone replay, compact drawing, smaller output"
@@ -861,7 +863,7 @@ def stage(name: str):
     return logger.contextualize(stage=name)
 ```
 
-### C3. `agentmd2cpn/runtime/emit.py` (299 lines, hash `47442ed5`)
+### C3. `agentmd2cpn/runtime/emit.py` (299 lines, hash `fe4cd2a3`)
 
 ```python
 """Emit the composed net as (a) a standalone runnable cpnpy Python file, (b) a Graphviz PNG of a marking,
@@ -1070,7 +1072,7 @@ def emit_python(spec: AgentSpec, frag: Fragment, cpn, marking, out: Path) -> Pat
     rules = [{"id": r.id, "kind": r.kind, "meaning": english(r.kind, r.args),
               "line": r.source.line_begin if r.source else 0, "quote": r.source.quote if r.source else ""} for r in spec.rules]
     code = TEMPLATE.render(fastcpn=inspect.getsource(FastCPN), explore=inspect.getsource(explore),
-                           accepting=dict(frag.blame.get(END, [])), blame={k: [tuple(x) for x in v] for k, v in frag.blame.items()}, name=spec.name, source=spec.source_file, source_hash=spec.source_hash, provenance=spec.provenance, filename=out.name,
+                           accepting=dict(frag.blame.get(END, [])), blame={k: [tuple(x) for x in v] for k, v in frag.blame.items()}, name=spec.name, source=spec.source_file.replace("\\", "/"), source_hash=spec.source_hash, provenance=spec.provenance, filename=out.name,
                            colorsets="\n".join(frag.colorsets.values()), user_code=frag.user_code,
                            rules=rules, actions=[a.id for a in spec.actions],
                            places=places, transitions=transitions, arcs=arcs, END=END, DONE=DONE)
@@ -1279,7 +1281,7 @@ def test_one_stage_at_a_time(tmp_path, capsys):
     assert "after (start): git_commit -> BLOCKED by R1 alone" in out and "git_push{'branch': 'main'} -> BLOCKED by R2 alone" in out
 ```
 
-### C5. `tests/test_emit.py` (61 lines, hash `2452a89c`)
+### C5. `tests/test_emit.py` (69 lines, hash `e010cfbd`)
 
 ```python
 import importlib.util
@@ -1343,4 +1345,12 @@ def test_generated_file_replays_a_run_with_rule_names(tmp_path):
     assert r.returncode == 0
     r = subprocess.run([sys.executable, str(py), "run_tests", "run_tests", "run_tests", "run_tests"], capture_output=True, text=True, timeout=300)
     assert "BLOCK run_tests (R2)" in r.stdout and r.returncode == 0                  # the fourth run_tests exceeds the limit of 3
+
+
+def test_generated_file_header_survives_a_windows_path(tmp_path):
+    spec = SPEC.model_copy(update={"source_file": "C:\\Users\\abhay\\demo\\.Agent.md"})     # backslash-U would be a unicode escape
+    frag, cpn, m0, ctx = build(spec)
+    py = emit_python(spec, frag, cpn, m0, tmp_path / "demo_cpn.py")
+    assert "from C:/Users/abhay/demo/.Agent.md" in py.read_text(encoding="utf-8")
+    assert run_generated(py)
 ```
