@@ -180,7 +180,9 @@ Part A done. Click **Keep** on Copilot's changes.
 ## Part B — the completed pipeline: REPORT.md, lock, enforcement check, fresh logs
 
 No Copilot in this part. Tests first (B1–B4), then two new modules (B5–B6), three replaced
-files (B7–B9), four small edits (B10–B13), then the check (B14).
+files (B7–B9), four small edits (B10–B13), then the check (B14). If you typed an earlier
+version of this document: B3, B5, B6, B8 and B11 changed (the hashes tell you) — see the note
+at the start of B14.
 
 ### B1. Create `tests/test_report.py` (type / copy; 55 lines, hash `acdc2aed`)
 
@@ -295,7 +297,7 @@ def test_changed_file_and_forced_llm_extract_again(tmp_path):
     assert "is for another version of t.agent.md" in (tmp_path / "out" / "pipeline.jsonl").read_text(encoding="utf-8")
 ```
 
-### B3. Create `tests/test_selfcheck.py` (47 lines, hash `6148c1b4`)
+### B3. Create `tests/test_selfcheck.py` (80 lines, hash `e5a41815`)
 
 ```python
 import yaml
@@ -345,6 +347,39 @@ def test_enforcement_check_is_skipped_for_an_inconsistent_or_empty_spec(tmp_path
     rep = run(md, tmp_path / "out2", extractor=f"yaml:{y}", png=False)
     assert rep["state_space"]["enforcement"]["witnesses"] == {}
     assert "## Enforcement check" not in (tmp_path / "out2" / "REPORT.md").read_text(encoding="utf-8")
+
+
+
+def test_deep_rules_are_found_by_the_directed_search_and_implied_rules_are_named(tmp_path):
+    from agentmd2cpn.dsl import AgentSpec
+    from agentmd2cpn.selfcheck import enforcement_witnesses, implied_rules
+    from agentmd2cpn.verify import build
+    md = tmp_path / "d.agent.md"
+    md.write_text("# D\n\n- Start with a.\n- Do c only after b.\n- Do d only after b.\n- Do d only after c.\n- Do b at most 3 times.\n"
+                  "- Finish with d.\n- After a, eventually d.\n", encoding="utf-8")
+    spec = {"name": "d", "actions": [{"id": "a"}, {"id": "b"}, {"id": "c"}, {"id": "d"}], "rules": [
+        {"id": "R1", "kind": "init", "args": {"action": "a"}, "source": {"line_begin": 3, "line_end": 3, "quote": "Start with a."}},
+        {"id": "R2", "kind": "precedence", "args": {"first": "b", "then": "c"}, "source": {"line_begin": 4, "line_end": 4, "quote": "Do c only after b."}},
+        {"id": "R3", "kind": "precedence", "args": {"first": "b", "then": "d"}, "source": {"line_begin": 5, "line_end": 5, "quote": "Do d only after b."}},
+        {"id": "R4", "kind": "precedence", "args": {"first": "c", "then": "d"}, "source": {"line_begin": 6, "line_end": 6, "quote": "Do d only after c."}},
+        {"id": "R5", "kind": "limit", "args": {"action": "b", "n": 3}, "source": {"line_begin": 7, "line_end": 7, "quote": "Do b at most 3 times."}},
+        {"id": "R6", "kind": "end", "args": {"action": "d"}, "source": {"line_begin": 8, "line_end": 8, "quote": "Finish with d."}},
+        {"id": "R7", "kind": "response", "args": {"trigger": "a", "then": "d"}, "source": {"line_begin": 9, "line_end": 9, "quote": "After a, eventually d."}}]}
+    y = tmp_path / "spec.yaml"
+    y.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    frag, cpn, m0, ctx = build(AgentSpec.model_validate(spec))
+    enf = enforcement_witnesses(AgentSpec.model_validate(spec), frag, cpn, m0, ctx, None, max_markings=0, bfs=0)   # phase 3 only
+    assert sorted(enf["witnesses"]) == ["R1", "R2", "R4", "R5", "R6"] and enf["unwitnessed"] == []
+    assert [a for a, _ in enf["witnesses"]["R5"]["path"]].count("b") == 3 and enf["witnesses"]["R5"]["step"] == "b"
+    assert enf["implied"]["R3"]["by"] == "R4" and enf["implied"]["R7"]["by"] == "R6"      # d needs c, c needs b; the run ends with d
+    two = AgentSpec.model_validate({"name": "t", "actions": [{"id": "a"}, {"id": "b"}], "rules": [
+        {"id": "R1", "kind": "init", "args": {"action": "a"}}, {"id": "R2", "kind": "precedence", "args": {"first": "a", "then": "b"}}]})
+    assert implied_rules(two) == {"R2": {"by": "R1", "why": "R1 makes a the first action, so nothing - b included - can happen before a"}}
+    rep = run(md, tmp_path / "out", extractor=f"yaml:{y}", png=False)
+    assert sorted(rep["state_space"]["enforcement"]["witnesses"]) == ["R1", "R2", "R4", "R5", "R6"]
+    text = (tmp_path / "out" / "REPORT.md").read_text(encoding="utf-8")
+    assert "b -> BLOCKED by R5" in text and "it is implied by R4" in text and "it is implied by R6" in text
+    assert "no probe for R3" in (tmp_path / "out" / "monitor.log").read_text(encoding="utf-8")
 ```
 
 ### B4. Append three tests
@@ -389,7 +424,7 @@ def test_rule_ids_follow_document_order_not_vote_order():
 **Check:** `python -m pytest tests -q` → the 10 new tests fail (missing `REPORT.md`, `run()` has no
 `lock` argument, no `enforcement` key, no `sha`, …); nothing else fails. That is expected; go on.
 
-### B5. Create `agentmd2cpn/report.py` (205 lines, hash `9f738b9b`)
+### B5. Create `agentmd2cpn/report.py` (208 lines, hash `c0d8900c`)
 
 ```python
 """REPORT.md - the verification result in the words of the agent file.
@@ -584,6 +619,9 @@ def write_report(doc, spec: AgentSpec, res: dict, out: Path, mode: str = "enforc
                 step = w["step"] + (f"{w['params']}" if w["params"] else "")
                 what = "finishing" if w["step"] == END else step
                 lines.append(f"- {_cite(r)}  --  after {fmt_path(w['path'])}: {what} -> BLOCKED by {r.id}")
+            elif r.id in enf.get("implied", {}):
+                imp = enf["implied"][r.id]
+                lines.append(f"- {_cite(r)}  --  never refuses a step on its own, it is implied by {imp['by']}: {imp['why']}")
             else:
                 lines.append(f"- {_cite(r)}  --  no step refused by this rule alone within {enf['states']} markings: other rules refuse the same steps first (the rule is implied by them), or its trigger lies deeper than the search went")
         lines += ["", "(also replayed on the Monitor: see monitor.log)", ""]
@@ -599,27 +637,30 @@ def write_report(doc, spec: AgentSpec, res: dict, out: Path, mode: str = "enforc
     return path
 ```
 
-### B6. Create `agentmd2cpn/selfcheck.py` (194 lines, hash `2347c327`)
+### B6. Create `agentmd2cpn/selfcheck.py` (363 lines, hash `f2ea3405`)
 
 ```python
 """Enforcement check: for every rule, one concrete step the compiled net refuses because of that rule alone.
 
-The reachable markings are searched breadth-first (bounded) for a state in which some action - or finishing - is
-blocked by exactly one rule.  Path + refused step is that rule's enforcement witness.  The witnesses and the
-verifier's complete run are then replayed on the Monitor, so monitor.log shows every rule enforcing its sentence on a
-real trace.  Nothing here knows any particular file: the probes come from the net and the blame map."""
+The reachable markings are searched (bounded) for a state in which some action - or finishing - is blocked by exactly
+one rule.  Path + refused step is that rule's enforcement witness.  Rules that can never refuse a step on their own
+because another rule always refuses it first are recognised from the rule set itself (implied rules).  The witnesses
+and the verifier's complete run are then replayed on the Monitor, so monitor.log shows every rule enforcing its
+sentence on a real trace.  Nothing here knows any particular file: the probes come from the net and the blame map."""
 from __future__ import annotations
 
 import ast
 import copy
 import heapq
 import itertools
+from collections import deque
 
 from loguru import logger
 
 from .compose import DONE, END
-from .dsl import AgentSpec
+from .dsl import AgentSpec, Rule
 from .runtime import Monitor
+from .templates import VIOL, build_dfa, english
 
 
 def _key_tokens(ms):
@@ -661,15 +702,162 @@ def _param_choices(cpn, m0, action: str) -> list[dict]:
     return [dict(zip(names, vals)) for vals in itertools.product(*domains)][:16] if names else [{}]
 
 
-def enforcement_witnesses(spec: AgentSpec, frag, cpn, m0, ctx, witness=None, max_markings: int = 400, bfs: int = 120) -> dict:
-    """{rule id: {"path": [(action, params)...], "step": action | END, "params": {...}}} for every compiled rule that
-    refuses some step on its own.  Phase 1 expands the first `bfs` reachable markings breadth-first (short, readable
-    witnesses for most rules).  Phase 2, for the rules still without one, continues best-first up to `max_markings`
-    expansions: markings where fewer rules block finishing come first (that is where one rule alone blocks it), among
-    them those in which a wanted rule is "armed" (its state place has left its initial state), then shallower ones.  A marking in which exactly one rule blocks
-    finishing is that rule's witness and is recorded as soon as it is generated.  The verifier's complete run, when
-    given, seeds phase 2: from an accepting marking a single pending obligation is one or two steps away."""
-    want = {r.id for r in spec.rules if r.modality != "should"}
+# ------------------------------------------------------------------ implied rules (from the rule set alone)
+
+_FIRST = {"precedence": ("first", "then"), "alt_precedence": ("first", "then"), "approval": ("approver", "action")}
+_ONLY_ACTION = {"precedence": "then", "alt_precedence": "then", "approval": "action", "not_succession": "b",
+                "limit": "action", "forbid_when": "action", "scope": "action"}
+_BEFORE_END = {"response": "then", "responded_existence": "b", "require": "action"}
+_TRIGGER = {"response": "trigger", "chain_response": "trigger", "responded_existence": "a", "not_succession": "a"}
+
+
+def _single(x):
+    """The one action of an init/end argument, or None when it lists alternatives."""
+    if isinstance(x, (list, tuple)):
+        return str(x[0]) if len(x) == 1 else None
+    return str(x)
+
+
+def implied_rules(spec: AgentSpec) -> dict[str, dict]:
+    """{rule id: {"by": other rule id, "why": sentence}} for compiled rules that never refuse a step on their own,
+    because every step they refuse is refused by another rule as well.  Four sound patterns:
+      1. precedence(c -> x) when c is the first action (init c), or when another rule demands y before x and y
+         itself can only happen after c (precedence / alt_precedence / approval chains, or init c);
+      2. response / responded_existence / require of x when a rule says the run must end with x; require x when
+         x is the first action or must happen exactly n >= 1 times; response(t -> x) when a chain_response says x
+         must come immediately after t;
+      3. a rule that only reacts after a trigger (response, chain_response, responded_existence, not_succession)
+         when that trigger is forbidden outright;
+      4. a rule that only ever refuses x (precedence, not_succession, limit, ...) when x is forbidden outright."""
+    rules = [r for r in spec.rules if r.modality != "should"]
+    actions = [a.id for a in spec.actions]
+    after: dict[str, set[str]] = {a: set() for a in actions}            # after[c] = actions that need c before them
+    for r in rules:
+        if r.kind in _FIRST:
+            c, x = str(r.args[_FIRST[r.kind][0]]), str(r.args[_FIRST[r.kind][1]])
+            after.setdefault(c, set()).add(x)
+        elif r.kind == "init" and _single(r.args["action"]) is not None:
+            c = _single(r.args["action"])
+            after.setdefault(c, set()).update(a for a in actions if a != c)
+
+    def needs_first(y: str, c: str) -> bool:                             # can y only happen after c?
+        seen, todo = set(), deque([c])
+        while todo:
+            u = todo.popleft()
+            for v in after.get(u, ()):
+                if v == y:
+                    return True
+                if v not in seen:
+                    seen.add(v)
+                    todo.append(v)
+        return False
+
+    forbidden = {str(r.args["action"]): r for r in rules if r.kind == "forbid"}
+    exactly = {str(r.args["action"]): r for r in rules if r.kind == "exactly" and int(r.args["n"]) >= 1}
+    ends = {_single(r.args["action"]): r for r in rules if r.kind == "end" and _single(r.args["action"]) is not None}
+    chains = {(str(r.args["trigger"]), str(r.args["then"])): r for r in rules if r.kind == "chain_response"}
+    inits = {_single(r.args["action"]): r for r in rules if r.kind == "init" and _single(r.args["action"]) is not None}
+    out: dict[str, dict] = {}
+    for r in rules:
+        if r.kind == "precedence":
+            c, x = str(r.args["first"]), str(r.args["then"])
+            if c in inits and x != c:
+                out[r.id] = {"by": inits[c].id, "why": f"{inits[c].id} makes {c} the first action, so nothing - {x} included - can happen before {c}"}
+                continue
+            for o in rules:
+                if o.id != r.id and o.kind in _FIRST and str(o.args[_FIRST[o.kind][1]]) == x:
+                    y = str(o.args[_FIRST[o.kind][0]])
+                    if y != c and needs_first(y, c):
+                        out[r.id] = {"by": o.id, "why": f"{o.id} already refuses {x} until {y} has happened, and {y} itself can only happen after {c}"}
+                        break
+            if r.id in out:
+                continue
+        if r.kind in _BEFORE_END:
+            x = str(r.args[_BEFORE_END[r.kind]])
+            if x in ends and ends[x].id != r.id:
+                out[r.id] = {"by": ends[x].id, "why": f"whenever {r.id} still waits for {x}, the run does not end with {x} either, which {ends[x].id} refuses"}
+                continue
+            if r.kind == "response" and (str(r.args["trigger"]), x) in chains:
+                o = chains[(str(r.args["trigger"]), x)]
+                out[r.id] = {"by": o.id, "why": f"{o.id} already refuses everything but {x} right after {r.args['trigger']}"}
+                continue
+            if r.kind == "require" and x in inits:
+                out[r.id] = {"by": inits[x].id, "why": f"{inits[x].id} makes {x} the first action, so a run without {x} is the empty run, which {inits[x].id} refuses to finish"}
+                continue
+            if r.kind == "require" and x in exactly:
+                out[r.id] = {"by": exactly[x].id, "why": f"a run without {x} has 0 of the {exactly[x].args['n']} {x} that {exactly[x].id} demands"}
+                continue
+        if r.kind in _TRIGGER:
+            t = str(r.args[_TRIGGER[r.kind]])
+            if t in forbidden:
+                out[r.id] = {"by": forbidden[t].id, "why": f"{r.id} only reacts after {t}, which {forbidden[t].id} forbids outright, so it never has anything to refuse"}
+                continue
+        if r.kind == "not_coexistence":
+            xs = [str(r.args["a"]), str(r.args["b"])]
+        else:
+            xs = [str(r.args[_ONLY_ACTION[r.kind]])] if r.kind in _ONLY_ACTION else []
+        for x in xs:
+            if x in forbidden and forbidden[x].id != r.id:
+                out[r.id] = {"by": forbidden[x].id, "why": f"{r.id} only ever refuses {x}, which {forbidden[x].id} forbids outright"}
+                break
+    return out
+
+
+# ------------------------------------------------------------------ the search
+
+def _driver(rule: Rule, actions: list[str]):
+    """(dist, refusable) for the directed search of one rule: dist(mk) = how far the rule's own state is from a state
+    in which it refuses something (0 = it refuses here); refusable(mk) = the actions it refuses in mk."""
+    R = rule.id
+    if rule.kind == "limit":
+        a, place = str(rule.args["action"]), f"B_{R}"
+        return (lambda mk: len(mk.get_multiset(place).tokens)), (lambda mk: [] if mk.get_multiset(place).tokens else [a])
+    if rule.kind == "phase_sequence":
+        allowed: dict[str, set] = {}
+        for ph in rule.args["phases"]:
+            for a in ph.get("allows", []):
+                allowed.setdefault(a, set()).add(ph["id"])
+        place = f"PHASE_{R}"
+        return (lambda mk: 0), (lambda mk: [a for a, phs in allowed.items() if mk.get_multiset(place).tokens[0].value not in phs])
+    if rule.kind in ("forbid_when", "scope"):
+        return (lambda mk: 0), (lambda mk: [str(rule.args["action"])])
+    dfa = build_dfa(rule.kind, rule.args).complete(actions)
+    viol = {s: [a for a in dfa.alphabet if dfa.delta.get((s, a), VIOL) == VIOL] for s in dfa.states}
+    pred: dict[str, set] = {}
+    for (s, a), t in dfa.delta.items():
+        pred.setdefault(t, set()).add(s)
+    dist = {s: 0 for s in dfa.states if viol[s] or s not in dfa.accepting}  # states that refuse an action or END
+    todo = deque(dist)
+    while todo:                                                                # reverse breadth-first over the automaton
+        t = todo.popleft()
+        for s in pred.get(t, ()):
+            if s not in dist:
+                dist[s] = dist[t] + 1
+                todo.append(s)
+    place = f"S_{R}"
+
+    def state(mk):
+        toks = mk.get_multiset(place).tokens
+        return toks[0].value.split(":", 1)[1] if toks else None
+
+    return (lambda mk: dist.get(state(mk), 99)), (lambda mk: viol.get(state(mk), []))
+
+
+def enforcement_witnesses(spec: AgentSpec, frag, cpn, m0, ctx, witness=None, max_markings: int = 400, bfs: int = 120,
+                          per_rule: int = 250) -> dict:
+    """{"witnesses": {rule id: {"path": [(action, params)...], "step": action | END, "params": {...}}},
+        "implied": {rule id: {"by": rule id, "why": ...}}, "unwitnessed": [...], "states": n}
+    for every compiled rule.  Implied rules are taken out first (no step is refused by them alone).  Phase 1 expands
+    the first `bfs` reachable markings breadth-first (short, readable witnesses for most rules).  Phase 2, for the
+    rules still without one, continues best-first up to `max_markings` expansions: markings where fewer rules block
+    finishing come first (that is where one rule alone blocks it), among them those in which a wanted rule is "armed"
+    (its state place has left its initial state), then shallower ones; the verifier's complete run, when given, seeds
+    it.  Phase 3 searches once more for each rule still without a witness, up to `per_rule` expansions, driven by
+    that rule alone: markings in which its own automaton is closest to refusing something come first, and only the
+    steps that rule can refuse are probed.  A marking in which exactly one rule blocks finishing is that rule's
+    witness and is recorded as soon as it is generated."""
+    implied = implied_rules(spec)
+    want = {r.id for r in spec.rules if r.modality != "should" and r.id not in implied}
     found: dict[str, dict] = {}
     actions = [t.name for t in cpn.transitions if t.name != END]
     choices = {a: _param_choices(cpn, m0, a) for a in actions}
@@ -697,17 +885,17 @@ def enforcement_witnesses(spec: AgentSpec, frag, cpn, m0, ctx, witness=None, max
             found[who[0]] = {"path": list(path), "step": END, "params": {}}
             want.discard(who[0])
 
-    def probe_actions(mk, path) -> None:
+    def probe_actions(mk, path, only=None) -> None:
         m = Monitor(cpn, mk, ctx, blame=frag.blame)
-        for a in actions:
-            for params in choices[a]:
+        for a in actions if only is None else only:
+            for params in choices.get(a, [{}]):
                 if not _enabled(cpn, mk, ctx, a, params):
                     who = m.explain(a, params)
                     if len(who) == 1 and who[0] in want:
                         found[who[0]] = {"path": list(path), "step": a, "params": params}
                         want.discard(who[0])
 
-    def successors(mk, path):
+    def successors(mk, path, seen):
         for t in cpn.transitions:
             for b in cpn._find_all_bindings(t, mk, ctx):
                 nxt = copy.deepcopy(mk)
@@ -729,7 +917,7 @@ def enforcement_witnesses(spec: AgentSpec, frag, cpn, m0, ctx, witness=None, max
         if mk.get_multiset(DONE).tokens:
             continue
         probe_actions(mk, path)
-        for nxt, npath in successors(mk, path):
+        for nxt, npath in successors(mk, path, seen):
             record_end(nxt, npath)
             heapq.heappush(heap, (len(npath), next(tick), nxt, npath))
     rest = [key2(mk, path) + (mk, path) for _, _, mk, path in heap]                 # phase 2: re-key
@@ -750,10 +938,27 @@ def enforcement_witnesses(spec: AgentSpec, frag, cpn, m0, ctx, witness=None, max
         if mk.get_multiset(DONE).tokens:
             continue
         probe_actions(mk, path)
-        for nxt, npath in successors(mk, path):
+        for nxt, npath in successors(mk, path, seen):
             record_end(nxt, npath)
             heapq.heappush(heap, key2(nxt, npath) + (nxt, npath))
-    return {"witnesses": found, "unwitnessed": sorted(want), "states": states}
+    by_id = {r.id: r for r in spec.rules}
+    for rid in sorted(want, key=lambda x: spec.rules.index(by_id[x])):            # phase 3: one directed search per rule
+        dist, refusable = _driver(by_id[rid], [a.id for a in spec.actions])
+        seen3, n = {_key(start)}, 0
+        heap = [(dist(start), len([x for x in failing(start) if x != rid]), 0, next(tick), start, [])]
+        while heap and rid in want and n < per_rule:
+            _, _, _, _, mk, path = heapq.heappop(heap)
+            n += 1
+            if mk.get_multiset(DONE).tokens:
+                continue
+            probe_actions(mk, path, only=refusable(mk))
+            for nxt, npath in successors(mk, path, seen3):
+                record_end(nxt, npath)
+                if rid not in want:
+                    break
+                heapq.heappush(heap, (dist(nxt), len([x for x in failing(nxt) if x != rid]), len(npath), next(tick), nxt, npath))
+        states += n
+    return {"witnesses": found, "implied": implied, "unwitnessed": sorted(want, key=lambda x: spec.rules.index(by_id[x])), "states": states}
 
 
 def _steps(witness) -> list[tuple[str, dict]]:
@@ -794,6 +999,8 @@ def replay(spec: AgentSpec, frag, cpn, m0, ctx, witness, enforcement: dict) -> N
             m.finish()
         else:
             m.try_action(w["step"], **w["params"])
+    for rid, imp in enforcement.get("implied", {}).items():
+        log.info("no probe for {} ({}): implied by {} - {}", rid, english(by_id[rid].kind, by_id[rid].args), imp["by"], imp["why"])
     if enforcement["unwitnessed"]:
         log.info("no single-rule refusal found within {} markings for: {}", enforcement["states"], ", ".join(enforcement["unwitnessed"]))
 ```
@@ -831,7 +1038,7 @@ def stage(name: str):
     return logger.contextualize(stage=name)
 ```
 
-### B8. Replace `agentmd2cpn/cli.py` entirely (196 lines, hash `ab92c959`)
+### B8. Replace `agentmd2cpn/cli.py` entirely (201 lines, hash `6882321c`)
 
 Your current `cli.py` was written by Copilot; this one contains everything it has (the batch's
 `verification_method`, the yaml and missing-file errors) plus the new stages. Keep nothing of
@@ -972,6 +1179,7 @@ def run(path: Path, out: Path, extractor: str = "auto", mode: str = "enforce", m
             logger.info("locked: {} will be reused for this version of {} until the file changes", dst, path.name)
     with stage("compile"):
         frag, cpn, m0, ctx = build(spec, mode)
+        logger.info("built the net: {} places, {} transitions, {} arcs", len(cpn.places), len(cpn.transitions), len(cpn.arcs))
     with stage("verify"):
         compiled = sum(1 for r in spec.rules if r.modality != "should")
         if verification_method(spec, verify) == "full":
@@ -981,11 +1189,15 @@ def run(path: Path, out: Path, extractor: str = "auto", mode: str = "enforce", m
             logger.info("{} rules: full state space not enumerable, using compositional verification", compiled)
             res = verify_large(spec, mode)
         n = composition_check(spec, samples=200)
+        logger.info("verified: {} markings{}, DONE reachable {}, trap states {}; composition check on {} random traces",
+                    res["states"], "" if res.get("complete", True) else " (bounded)", res["done_reachable"], res["trap_states"], n)
     with stage("selfcheck"):
         res["enforcement"] = enforcement_witnesses(spec, frag, cpn, m0, ctx, res.get("witness"))
-        logger.info("enforcement witnesses: {} of {} rules refuse a step on their own within {} markings{}",
-                    len(res["enforcement"]["witnesses"]), compiled, res["enforcement"]["states"],
-                    f"; none found for {', '.join(res['enforcement']['unwitnessed'])}" if res["enforcement"]["unwitnessed"] else "")
+        enf = res["enforcement"]
+        logger.info("enforcement witnesses: {} of {} rules refuse a step on their own within {} markings{}{}",
+                    len(enf["witnesses"]), compiled, enf["states"],
+                    f"; {len(enf['implied'])} implied by other rules ({', '.join(enf['implied'])})" if enf["implied"] else "",
+                    f"; none found for {', '.join(enf['unwitnessed'])}" if enf["unwitnessed"] else "")
         replay(spec, frag, cpn, m0, ctx, res.get("witness"), res["enforcement"])
     with stage("report"):
         write_report(doc, spec, res, out, mode, note)
@@ -1083,25 +1295,44 @@ two lines (same indentation):
     provenance: str = ""         # who produced the rules: "llm <deployment> samples=3 min_votes=2 <date>" or "reviewed"
 ```
 
-### B11. Edit `agentmd2cpn/ingest.py` (five small insertions)
+### B11. Edit `agentmd2cpn/ingest.py` (one field, one block at the end)
 
-1. With the imports at the top, add a line `import hashlib`.
-2. In `class Document`, after the line `imports: list[str] = field(default_factory=list)` add:
+1. In `class Document`, after the line `imports: list[str] = field(default_factory=list)` add (skip
+   if the field is already there):
    ```python
-       sha: str = ""                                   # of the text (and of every imported file): identifies this version of the file
+       sha: str = ""                                   # identifies this version of the file (text + imported files)
    ```
-3. In `parse_markdown`, directly after the line `doc = Document(file=str(path))` add:
+2. Append this block at the very END of `ingest.py` (it wraps `parse_markdown`, whatever its
+   internal structure is, and fills `doc.sha` from the file text and every `@imported` file):
    ```python
-       digest = hashlib.sha256(text.encode("utf-8"))
-   ```
-4. In the loop over imports (`for imp in list(doc.imports):`), directly after the line
-   `doc.code_spans.extend(sub.code_spans)` add (same indentation as that line):
-   ```python
-               digest.update(sub.sha.encode())
-   ```
-5. Directly before the final `return doc` of `parse_markdown` add:
-   ```python
-       doc.sha = digest.hexdigest()[:16]
+   # ---- the file's hash (its text plus every imported file), independent of how the parser above is organised
+   import hashlib as _hashlib
+   import re as _re
+   from pathlib import Path as _Path
+
+   _IMPORT_LINE = _re.compile(r"(?m)^@(\S+\.md)\s*$")
+
+
+   def _sha_of(path, seen: set) -> str:
+       text = path.read_text(encoding="utf-8")
+       digest = _hashlib.sha256(text.encode("utf-8"))
+       for imp in _IMPORT_LINE.findall(text):
+           p = path.parent / imp
+           if p.exists() and str(p.resolve()) not in seen:
+               seen.add(str(p.resolve()))
+               digest.update(_sha_of(p, seen).encode())
+       return digest.hexdigest()[:16]
+
+
+   _parse_markdown_without_sha = parse_markdown
+
+
+   def parse_markdown(path, *args, **kwargs):
+       """parse_markdown as above, plus doc.sha: the hash that identifies this version of the file and its imports."""
+       doc = _parse_markdown_without_sha(path, *args, **kwargs)
+       p = _Path(path)
+       doc.sha = _sha_of(p, {str(p.resolve())})
+       return doc
    ```
 
 ### B12. Edit `agentmd2cpn/extract.py` (two edits in `ground_and_vote`)
@@ -1134,11 +1365,23 @@ two lines (same indentation):
 
 ### B14. Check
 
+> **Typed B1–B13 from an earlier version of this document?** Four things changed, each because
+> of what your own run showed: (1) `ingest.py` — the five insertions are replaced by the one
+> block at the end of the file (B11; whatever you inserted before can stay, the block at the end
+> overrides it); (2) `cli.py` — two log lines so that the compile and verify stages are recorded in
+> `pipeline.jsonl` even though your compile/verify modules do not log (B8, hash `6882321c`);
+> (3) `selfcheck.py` and `report.py` — the enforcement search has a third, directed phase and names
+> the rules that are implied by other rules (B6 hash `f2ea3405`, B5 hash `c0d8900c`): the earlier
+> search found 14 of the 16 release rules (R13 and R14 need a six-step run that its best-first order
+> did not reach within its budget); (4) one more test in `tests/test_selfcheck.py` (B3, hash
+> `e5a41815`, the last test in the file is new). Replace those files with the versions above,
+> check the four hashes, then continue here.
+
 ```powershell
 python -m pytest tests -q
 ```
 
-→ `N+16 passed` (the 6 from Part A, 3 + 2 + 2 new files, +1 in ingest, cli, extract). Then:
+→ `N+17 passed` (the 6 from Part A, 3 + 2 + 3 in the new test files, +1 in ingest, cli, extract). Then:
 
 ```powershell
 python -m agentmd2cpn examples/release_agent/.Agent.md -o out/release_agent --extractor yaml:examples/release_agent/spec.yaml --no-png
@@ -1148,7 +1391,9 @@ type out\release_agent\monitor.log
 
 Expected last line of the run: `16 rules, 2569 reachable markings, consistent=True, traps=0,
 dead=['force_push'], generated file re-verified=True`. In the log, a new stage line:
-`selfcheck | enforcement witnesses: 16 of 16 rules refuse a step on their own within … markings`.
+`selfcheck | enforcement witnesses: 16 of 16 rules refuse a step on their own within 436 markings`
+(this file has no implied rules; for a file that has some, the line continues with
+`; 5 implied by other rules (R14, …)` and REPORT.md says which rule implies each of them and why).
 
 `REPORT.md` has these sections, in this order: the counts line, `rules from
 examples/release_agent/spec.yaml (no provenance recorded)`, `## Verdict: CONSISTENT - every rule
@@ -1161,7 +1406,7 @@ with sixteen lines like
 - R1  init: first action must be read_changelog   (line 13: "Start by reading the changelog.")  --  after (start): run_build -> BLOCKED by R1
 - R9  limit: retry_deployment at most 2 times   (line 25: "Do not retry a failed deployment more than 2 times.")  --  after read_changelog -> retry_deployment -> retry_deployment: retry_deployment -> BLOCKED by R9
 - R11  forbid: force_push is never allowed   (line 27: "Never force-push to any branch.")  --  after read_changelog: force_push -> BLOCKED by R11
-- R13  responded_existence: if make_hotfix happens, ensure_ticket_exists must happen too   (line 29: ...)  --  after read_changelog -> run_build -> run_tests -> tag_release -> make_hotfix -> post_release_summary: finishing -> BLOCKED by R13
+- R13  responded_existence: if make_hotfix happens, ensure_ticket_exists must happen too   (line 29: ...)  --  after read_changelog -> make_hotfix -> run_build -> run_tests -> tag_release -> post_release_summary: finishing -> BLOCKED by R13
 ```
 
 then `## Rules` and `## Actions`. `monitor.log` was written by the pipeline run itself:
@@ -1314,7 +1559,7 @@ prompt: |
 python -m pytest tests -q
 ```
 
-→ `N+18 passed`.
+→ `N+19 passed`.
 
 ### C5. Create `examples/review/spec.yaml` (152 lines, hash `f410de19`)
 
@@ -1564,13 +1809,15 @@ python -m agentmd2cpn examples/universal/universal.agent.md -o out/universal --e
 
 Expected summary lines: `16 rules, 2569 …`; `47 rules, compositional check: conflicts=0,
 consistent=True, explored=5002 markings (bounded), traps=0, dead=[…five…]` with
-`enforcement witnesses: about 27 of 38 rules …; none found for …` (the rest are listed in
-`REPORT.md` as *implied by other rules or deeper than the search went* — for instance
-`invoke_impact_analysis only after confirm_configuration` can never refuse alone because
-`invoke_trigger_detection only after confirm_configuration` always refuses first; that is a true
-statement about the file); `4 rules, 48 …` with `4 of 4`; `0 rules, 2 …` with
-`REPORT.md` saying `## Verdict: NOTHING TO ENFORCE`. Each locked `spec.yaml` now starts with
-`source_hash: …` and `provenance: reviewed 2026-11-04`.
+`enforcement witnesses: 33 of 38 rules refuse a step on their own within … markings; 5 implied by
+other rules (R14, R15, R16, R17, R25)` — in `REPORT.md` each of the five says which rule implies it
+and why, for instance `invoke_impact_analysis only after confirm_configuration` *never refuses a
+step on its own, it is implied by R39: R39 already refuses invoke_impact_analysis until
+invoke_trigger_detection has happened, and invoke_trigger_detection itself can only happen after
+confirm_configuration* (a true statement about the file; the selfcheck stage takes about 40 s for
+this agent); `4 rules, 48 …` with `4 of 4`; `0 rules, 2 …` with `REPORT.md` saying
+`## Verdict: NOTHING TO ENFORCE`. Each locked `spec.yaml` now starts with `source_hash: …` and
+`provenance: reviewed 2026-11-04`.
 
 ### E2. Three runs, no model, identical
 
@@ -1632,7 +1879,7 @@ Update README.md and docs/ARCHITECTURE.md only (no code, no tests). Keep their s
 5. A section "Workflow for a new file": run; read Review first and Conflicts in REPORT.md; fix agent_spec.yaml if a sentence was misread; rerun with --extractor yaml:<that file> --lock; from then on every run is identical and calls no model.
 6. Layout: add agentmd2cpn/report.py (REPORT.md), agentmd2cpn/selfcheck.py (enforcement witnesses and the Monitor replay), agentmd2cpn/prompt/extraction.yaml (the extraction prompt), examples/review/ (the code-review agent example), and the new test files.
 7. Tests: the count is what `python -m pytest tests -q` prints now (run it and use that number).
-8. Limitations: add - a rule for which no step refused by it alone is found within the search bound is reported as implied by other rules or deeper than the search went, not as proven; phase_sequence allows a phase with no action of its own (seen in the review agent); conditions are checked on the parameters the caller passes, not on what the called tool actually returned; init/end accept a list of alternatives, other kinds do not.
+8. Limitations: add - a rule that is implied by another rule (every step it refuses, the other refuses too) is named with the implying rule and the reason; a rule for which no step refused by it alone is found within the search bound is reported as such (implied, or deeper than the search went), not as proven; phase_sequence allows a phase with no action of its own (seen in the review agent); conditions are checked on the parameters the caller passes, not on what the called tool actually returned; init/end accept a list of alternatives, other kinds do not.
 9. docs/ARCHITECTURE.md: in the pipeline/stage list add `selfcheck` (enforcement witnesses, Monitor replay) and `report` (REPORT.md) between verify and emit, and the auto/lock logic of the extract stage (lock_path, find_spec, source_hash).
 Do not change any number you cannot read from the current outputs. Then show me the diff.
 ```
