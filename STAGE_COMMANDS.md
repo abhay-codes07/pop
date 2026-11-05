@@ -48,3 +48,40 @@ Select-String -CaseSensitive -Path agentmd2cpn/*.py, agentmd2cpn/*/*.py -Pattern
 ```
 
 → `pipeline.log` readable
+
+---
+
+## Follow-up — per-run log folders by stage
+
+Same mechanism, arranged his way:
+
+```text
+Rule: nothing in agentmd2cpn/ may name any agent file's actions, rules or paths; existing tests untouched; tests you wrote yourself in tests/test_logs.py and tests/test_drive.py may be adjusted; run python -m pytest tests -q at the end and show the count.
+Rearrange the per-run log folders using loguru sinks with a filter on extra["stage"], all in agentmd2cpn/logging_setup.py. A pipeline run folder runs/<date>-pipeline/ gets: pipeline.log (every line, readable format) and one file per stage - ingest.log, extract.log, compile.log, verify.log, selfcheck.log, report.log, emit.log, monitor.log - each containing only the lines of that stage, created only if the stage logged something. A drive folder runs/<date>-drive[-label]/ gets only monitor.log (and marking.png with --png); remove run.log there. At the top of out/<name>/ keep pipeline.log and monitor.log as the latest run; write pipeline.jsonl only when run is given a new flag --jsonl. Update docstrings and --help.
+```
+
+What you get after it, for the review file:
+
+```text
+out\review\
+  agent_spec.yaml  REPORT.md  review_cpn.py  review_cpn.png
+  pipeline.log            the latest pipeline run, every stage, readable
+  monitor.log             the latest run's decisions + every drive since
+  runs\
+    20261105-104514-pipeline\
+      pipeline.log  ingest.log  extract.log  compile.log  verify.log  selfcheck.log  monitor.log  report.log  emit.log
+    20261105-104517-drive-two_steps\
+      monitor.log   (marking.png with --png)
+```
+
+`extract.log` of a first-time file will hold the model call lines (samples, votes, REJECT/DROP); `verify.log` the state space; `selfcheck.log` the witnesses; `monitor.log` the ALLOW/BLOCK lines. That is "where you are keeping the logs such as ingest, extract, compile" — one file each, on disk, per run, by loguru — and the top-level files remain the quick look.
+
+Check after Keep:
+
+```powershell
+agentmd2cpn examples\review\review.agent.md
+dir out\review\runs\*-pipeline | Select-Object -Last 1 | Get-ChildItem
+type (Get-ChildItem out\review\runs\*-pipeline\extract.log | Select-Object -Last 1)
+```
+
+→ the nine files in the newest pipeline folder
