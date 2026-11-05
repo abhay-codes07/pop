@@ -27,3 +27,24 @@ agentmd2cpn check   examples\review\review.agent.md
 Select-String -CaseSensitive -Path agentmd2cpn/*.py, agentmd2cpn/*/*.py -Pattern "read_diff|deploy_to_|retry_deployment|approve_pr|publish_change|ticket|review_agent|release_agent"
 python -m pytest tests -q
 ```
+
+---
+
+## Follow-up — drive runs folder without `--png`
+
+```text
+In tests/test_drive.py the assertion at line 46 pinned the old behaviour (no runs folder without --png). Change only that assertion: without --png the drive's runs/<date>-drive folder must exist and contain run.log and monitor.log, and must not contain marking.png. Change nothing else; run python -m pytest tests -q and show the count.
+```
+
+→ `142 passed`. Then the step-4 checks:
+
+```powershell
+agentmd2cpn examples\review\review.agent.md
+type out\review\pipeline.log
+agentmd2cpn drive out\review read_diff run_tests --name two_steps
+dir out\review\runs
+dir out\review\runs\*-drive-two_steps
+Select-String -CaseSensitive -Path agentmd2cpn/*.py, agentmd2cpn/*/*.py -Pattern "read_diff|deploy_to_|retry_deployment|approve_pr|publish_change|ticket|review_agent|release_agent"
+```
+
+→ `pipeline.log` readable
