@@ -85,3 +85,29 @@ type (Get-ChildItem out\review\runs\*-pipeline\extract.log | Select-Object -Last
 ```
 
 → the nine files in the newest pipeline folder
+
+---
+
+## Follow-up — fix the 17 failing tests after removing `--jsonl`
+
+Give it this:
+
+```text
+The 17 failures are in tests/test_logs.py and tests/test_drive.py, which you wrote and which still assert the removed --jsonl opt-in. Update those two files only, so that they assert the current behaviour: pipeline.jsonl is always written at the top of out/<name>/ (fresh for a pipeline run, appended by drive); a pipeline run folder holds pipeline.log plus the per-stage logs; a drive folder holds only monitor.log (and marking.png with --png). Delete any test that exists only to check the --jsonl flag. Do not touch any other test file. Run python -m pytest tests -q and show the count.
+```
+
+→ all passing (around 150; the exact number is whatever remains after the `--jsonl` tests are deleted). Then the check from before:
+
+```powershell
+agentmd2cpn examples\review\review.agent.md
+Get-ChildItem out\review\runs\*-pipeline | Select-Object -Last 1 | Get-ChildItem
+Select-String -CaseSensitive -Path agentmd2cpn/*.py, agentmd2cpn/*/*.py -Pattern "read_diff|deploy_to_|retry_deployment|approve_pr|publish_change|ticket|review_agent|release_agent"
+```
+
+→ the newest pipeline folder has `pipeline.log` plus `ingest.log`, `extract.log`, `compile.log`, `verify.log`, `selfcheck.log`, `monitor.log`, `report.log`, `emit.log`; the grep prints nothing. Keep, and step 4 is done.
+
+For the remaining steps, use this rule line instead of the old one, so this does not happen again:
+
+```text
+Rule: nothing in agentmd2cpn/ may name any agent file's actions, rules or paths; do not edit the original test files (test_cli, test_lock, test_report, test_selfcheck, test_emit, test_extract, test_ingest, test_dsl, test_templates, test_compile, test_compose, test_verify, test_verify_large, test_runtime, test_fastcpn, test_llm_client); the test files you created (test_drive, test_stage_commands, test_logs, and new ones) you may update to the current behaviour; run python -m pytest tests -q at the end and show the count.
+```
